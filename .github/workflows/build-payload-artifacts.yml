@@ -1,0 +1,138 @@
+name: Build Payload Artifacts
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'src/**'
+      - 'Makefile'
+      - 'support/targets-v3.json'
+      - 'tools/**'
+      - '.github/workflows/**'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: payload-artifacts-main
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Rebuild all target artifacts
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v4
+        with:
+          packages: 'platform-tools platforms;android-35'
+          accept-android-sdk-licenses: true
+
+      - name: Set up NDK r28
+        uses: nttld/setup-ndk@v1
+        with:
+          ndk-version: r28
+
+      - name: Resolve NDK path
+        shell: bash
+        run: |
+          set -euo pipefail
+          NDK_HOME="$(find "${ANDROID_SDK_ROOT}/ndk" -mindepth 1 -maxdepth 1 -type d | sort -V | tail -n 1)"
+          test -n "$NDK_HOME"
+          echo "ANDROID_NDK_HOME=$NDK_HOME" >> "$GITHUB_ENV"
+          echo "Using ANDROID_NDK_HOME=$NDK_HOME"
+
+      - name: Build every target and replace published app artifacts
+        shell: bash
+        run: |
+          set -euo pipefail
+          mapfile -t TARGET_DIRS < <(find src/targets -mindepth 1 -maxdepth 1 -type d | sort)
+          test "${#TARGET_DIRS[@]}" -gt 0
+
+          mkdir -p diagnostics/artifacts
+
+          for target_dir in "${TARGET_DIRS[@]}"; do
+            target="$(basename "$target_dir")"
+            echo "=== BUILD $target ==="
+            test -f "$target_dir/target.h"
+
+            make clean TARGET="$target"
+            make all release TARGET="$target"
+
+            output="build/$target/cve-2026-43499-app.release.so"
+            test -f "$output"
+            test "$(stat -c %s "$output")" -eq 104128
+
+            mkdir -p "artifacts/$target"
+            install -m 0644 "$output" "artifacts/$target/cve-2026-43499-app.so"
+            sha256sum "artifacts/$target/cve-2026-43499-app.so" | tee "diagnostics/artifacts/$target.sha256"
+          done
+
+      - name: Verify manifest paths and local artifacts
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          from urllib.parse import urlparse
+
+          manifest = json.loads(Path('support/targets-v3.json').read_text())
+          payloads = manifest.get('payloads', [])
+          assert payloads, 'targets-v3.json contains no payloads'
+
+          for p in payloads:
+              url = p['exploit']['url']
+              path = urlparse(url).path
+              marker = '/artifacts/'
+              assert marker in path, f"bad exploit URL: {url}"
+              artifact_rel = path.split(marker, 1)[1]
+              artifact_path = Path('artifacts') / artifact_rel
+              assert artifact_path.is_file(), f"missing artifact: {artifact_path}"
+              expected = int(p['exploit']['size'])
+              actual = artifact_path.stat().st_size
+              assert actual == expected, f"size mismatch {artifact_path}: {actual} != {expected}"
+
+              kurl = p['kernelsu']['url']
+              kpath = urlparse(kurl).path
+              km = '/kernelsu/'
+              assert km in kpath, f"bad KernelSU URL: {kurl}"
+              krel = kpath.split(km, 1)[1]
+              kfile = Path('kernelsu') / krel
+              assert kfile.is_file(), f"missing KernelSU artifact: {kfile}"
+              kexpected = int(p['kernelsu']['size'])
+              kactual = kfile.stat().st_size
+              assert kactual == kexpected, f"KernelSU size mismatch {kfile}: {kactual} != {kexpected}"
+
+          print(f'verified {len(payloads)} payload profiles, app artifacts, and KernelSU files')
+          PY
+
+      - name: Upload build diagnostics
+        uses: actions/upload-artifact@v4
+        with:
+          name: payload-build-diagnostics
+          path: diagnostics/
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Commit regenerated artifacts
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add artifacts/
+          if git diff --cached --quiet; then
+            echo "No published artifact changes."
+            exit 0
+          fi
+          git commit -m "ci: rebuild payload artifacts [skip ci]"
+          git push origin HEAD:main
