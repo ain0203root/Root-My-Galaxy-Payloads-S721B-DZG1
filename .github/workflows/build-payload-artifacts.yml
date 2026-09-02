@@ -20,8 +20,8 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  TARGET: essi-S721NKSSCDZF3
-  ARTIFACT_PATH: artifacts/essi-S721NKSSCDZF3/cve-2026-43499-app.so
+  TARGET: r12s-S721BXXSCDZF3
+  ARTIFACT_PATH: artifacts/r12s-S721BXXSCDZF3/cve-2026-43499-app.so
 
 jobs:
   build:
@@ -85,11 +85,11 @@ jobs:
           from pathlib import Path
           from urllib.parse import urlparse
 
-          target = "essi-S721NKSSCDZF3"
+          target = "r12s-S721BXXSCDZF3"
           manifest = json.loads(Path('support/targets-v3.json').read_text())
-          candidates = [p for p in manifest.get('payloads', []) if target in p.get('exploit', {}).get('url', '')]
+          candidates = [p for p in manifest.get('payloads', []) if p.get('payloadId') == target]
           if not candidates:
-              raise SystemExit(f"S24 FE artifact target not found in manifest: {target}")
+              raise SystemExit(f"S24 FE profile not found in manifest: {target}")
 
           p = candidates[0]
           url = p['exploit']['url']
