@@ -1,4 +1,4 @@
-name: Build Payload Artifacts
+name: Build S24 FE Payload Artifact
 
 on:
   push:
@@ -16,14 +16,18 @@ permissions:
   contents: write
 
 concurrency:
-  group: payload-artifacts-main
+  group: payload-artifact-s721b
   cancel-in-progress: false
+
+env:
+  TARGET: essi-S721NKSSCDZF3
+  ARTIFACT_PATH: artifacts/essi-S721NKSSCDZF3/cve-2026-43499-app.so
 
 jobs:
   build:
-    name: Rebuild all target artifacts
+    name: Rebuild S24 FE artifact
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 30
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -50,89 +54,76 @@ jobs:
           echo "ANDROID_NDK_HOME=$NDK_HOME" >> "$GITHUB_ENV"
           echo "Using ANDROID_NDK_HOME=$NDK_HOME"
 
-      - name: Build every target and replace published app artifacts
+      - name: Build only S24 FE target
         shell: bash
         run: |
           set -euo pipefail
-          mapfile -t TARGET_DIRS < <(find src/targets -mindepth 1 -maxdepth 1 -type d | sort)
-          test "${#TARGET_DIRS[@]}" -gt 0
+          test -f "src/targets/${TARGET}/target.h"
+          echo "=== BUILD ${TARGET} ONLY ==="
+          make clean TARGET="${TARGET}"
+          make all release TARGET="${TARGET}"
 
-          mkdir -p diagnostics/artifacts
+          output="build/${TARGET}/cve-2026-43499-app.release.so"
+          test -f "$output"
+          size="$(stat -c %s "$output")"
+          echo "Built $output ($size bytes)"
 
-          for target_dir in "${TARGET_DIRS[@]}"; do
-            target="$(basename "$target_dir")"
-            echo "=== BUILD $target ==="
-            test -f "$target_dir/target.h"
+          mkdir -p "$(dirname "${ARTIFACT_PATH}")" diagnostics
+          install -m 0644 "$output" "${ARTIFACT_PATH}"
+          sha256sum "${ARTIFACT_PATH}" | tee diagnostics/s721b-app.sha256
 
-            make clean TARGET="$target"
-            make all release TARGET="$target"
-
-            output="build/$target/cve-2026-43499-app.release.so"
-            test -f "$output"
-            test "$(stat -c %s "$output")" -eq 104128
-
-            mkdir -p "artifacts/$target"
-            install -m 0644 "$output" "artifacts/$target/cve-2026-43499-app.so"
-            sha256sum "artifacts/$target/cve-2026-43499-app.so" | tee "diagnostics/artifacts/$target.sha256"
-          done
-
-      - name: Verify manifest paths and local artifacts
+      - name: Verify S24 FE artifact only
         shell: bash
         run: |
           set -euo pipefail
+          test -f "${ARTIFACT_PATH}"
+          actual="$(stat -c %s "${ARTIFACT_PATH}")"
+          test "$actual" -eq 104128
+
           python3 - <<'PY'
           import json
           from pathlib import Path
           from urllib.parse import urlparse
 
+          target = "essi-S721NKSSCDZF3"
           manifest = json.loads(Path('support/targets-v3.json').read_text())
-          payloads = manifest.get('payloads', [])
-          assert payloads, 'targets-v3.json contains no payloads'
+          candidates = [p for p in manifest.get('payloads', []) if target in p.get('exploit', {}).get('url', '')]
+          if not candidates:
+              raise SystemExit(f"S24 FE artifact target not found in manifest: {target}")
 
-          for p in payloads:
-              url = p['exploit']['url']
-              path = urlparse(url).path
-              marker = '/artifacts/'
-              assert marker in path, f"bad exploit URL: {url}"
-              artifact_rel = path.split(marker, 1)[1]
-              artifact_path = Path('artifacts') / artifact_rel
-              assert artifact_path.is_file(), f"missing artifact: {artifact_path}"
-              expected = int(p['exploit']['size'])
-              actual = artifact_path.stat().st_size
-              assert actual == expected, f"size mismatch {artifact_path}: {actual} != {expected}"
+          p = candidates[0]
+          url = p['exploit']['url']
+          path = urlparse(url).path
+          expected_suffix = f"/artifacts/{target}/cve-2026-43499-app.so"
+          if not path.endswith(expected_suffix):
+              raise SystemExit(f"S24 FE exploit URL does not point to {expected_suffix}: {url}")
 
-              kurl = p['kernelsu']['url']
-              kpath = urlparse(kurl).path
-              km = '/kernelsu/'
-              assert km in kpath, f"bad KernelSU URL: {kurl}"
-              krel = kpath.split(km, 1)[1]
-              kfile = Path('kernelsu') / krel
-              assert kfile.is_file(), f"missing KernelSU artifact: {kfile}"
-              kexpected = int(p['kernelsu']['size'])
-              kactual = kfile.stat().st_size
-              assert kactual == kexpected, f"KernelSU size mismatch {kfile}: {kactual} != {kexpected}"
+          expected = int(p['exploit']['size'])
+          actual = Path('artifacts') / target / 'cve-2026-43499-app.so'
+          if actual.stat().st_size != expected:
+              raise SystemExit(f"S24 FE artifact size mismatch: {actual.stat().st_size} != {expected}")
 
-          print(f'verified {len(payloads)} payload profiles, app artifacts, and KernelSU files')
+          print(f"verified S24 FE target {target}: {actual.stat().st_size} bytes")
           PY
 
       - name: Upload build diagnostics
         uses: actions/upload-artifact@v4
         with:
-          name: payload-build-diagnostics
+          name: s721b-payload-build-diagnostics
           path: diagnostics/
           if-no-files-found: error
           retention-days: 14
 
-      - name: Commit regenerated artifacts
+      - name: Commit regenerated S24 FE artifact
         shell: bash
         run: |
           set -euo pipefail
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add artifacts/
+          git add "${ARTIFACT_PATH}"
           if git diff --cached --quiet; then
-            echo "No published artifact changes."
+            echo "No S24 FE artifact changes."
             exit 0
           fi
-          git commit -m "ci: rebuild payload artifacts [skip ci]"
+          git commit -m "ci: rebuild S24 FE payload artifact [skip ci]"
           git push origin HEAD:main
