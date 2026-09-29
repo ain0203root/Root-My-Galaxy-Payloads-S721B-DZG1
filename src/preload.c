@@ -16,6 +16,99 @@
 #endif
 #define APP_MIN_BOOT_UPTIME_SEC 120
 
+
+static int diag_has_stage(const char *spec, const char *stage) {
+  if (!spec || !*spec || !stage || !*stage) return 0;
+  size_t n = strlen(stage);
+  const char *p = spec;
+  while (*p) {
+    while (*p == ' ' || *p == '\t' || *p == ',') p++;
+    if (!*p) break;
+    const char *end = strchr(p, ',');
+    size_t len = end ? (size_t)(end - p) : strlen(p);
+    while (len && (p[len - 1] == ' ' || p[len - 1] == '\t')) len--;
+    if (len == n && !strncmp(p, stage, n)) return 1;
+    if (!end) break;
+    p = end + 1;
+  }
+  return 0;
+}
+
+static void diag_stage_target(void) {
+  pr_info("diag[target] BUILD_FINGERPRINT=%s\n", BUILD_FINGERPRINT);
+#ifdef BUILD_VARIANT_LABEL
+  pr_info("diag[target] BUILD_VARIANT_LABEL=%s\n", BUILD_VARIANT_LABEL);
+#endif
+  pr_info("diag[target] MM_STRUCT_SZ=0x%zx MM_ORDER=%d PAGE_SIZE=0x%lx\n",
+          (size_t)MM_STRUCT_SZ, MM_ORDER, (unsigned long)PAGE_SIZE);
+}
+
+static void diag_stage_interfaces(void) {
+  const char *paths[] = {
+    "/proc/self/status",
+    "/proc/slabinfo",
+    "/sys/kernel/tracing",
+    "/sys/kernel/tracing/trace",
+    "/sys/fs/selinux/enforce",
+  };
+  for (size_t i = 0; i < sizeof(paths) / sizeof(paths[0]); i++) {
+    errno = 0;
+    int fd = open(paths[i], O_RDONLY | O_CLOEXEC);
+    if (fd >= 0) {
+      pr_info("diag[interfaces] %s: readable\n", paths[i]);
+      close(fd);
+    } else {
+      pr_warning("diag[interfaces] %s: unavailable errno=%d\n",
+                 paths[i], errno);
+    }
+  }
+}
+
+static void diag_stage_slab(void) {
+  FILE *fp = fopen("/proc/slabinfo", "re");
+  if (!fp) {
+    pr_warning("diag[slab] open failed errno=%d\n", errno);
+    return;
+  }
+  char line[512];
+  int found = 0;
+  while (fgets(line, sizeof(line), fp)) {
+    if (!strncmp(line, "mm_struct ", 10)) {
+      pr_info("diag[slab] %s", line);
+      found = 1;
+      break;
+    }
+  }
+  fclose(fp);
+  if (!found) pr_warning("diag[slab] mm_struct entry not visible\n");
+}
+
+static int run_diagnostic_mode(void) {
+  const char *spec = getenv("RMG_DIAG");
+  if (!spec || !*spec) return 0;
+
+  pr_success("diagnostic mode: RMG_DIAG=%s\n", spec);
+  if (!strcmp(spec, "help")) {
+    pr_info("stages: startup,target,interfaces,slab,all\n");
+    pr_info("example: RMG_DIAG=target,interfaces,slab\n");
+    return 1;
+  }
+
+  int all = diag_has_stage(spec, "all");
+  if (all || diag_has_stage(spec, "startup")) log_startup_context();
+  if (all || diag_has_stage(spec, "target")) diag_stage_target();
+  if (all || diag_has_stage(spec, "interfaces")) diag_stage_interfaces();
+  if (all || diag_has_stage(spec, "slab")) diag_stage_slab();
+
+  if (!all && !diag_has_stage(spec, "startup") &&
+      !diag_has_stage(spec, "target") &&
+      !diag_has_stage(spec, "interfaces") &&
+      !diag_has_stage(spec, "slab")) {
+    pr_error("diagnostic mode: unknown stage; use RMG_DIAG=help\n");
+  }
+  return 1;
+}
+
 #if defined(APP_PAYLOAD) && defined(SLIDE_P0_OFFSET_CANDIDATES)
 struct app_p0_shared_state {
   atomic_int dirty;
@@ -109,6 +202,11 @@ __attribute__((constructor)) static void load(void) {
   }
   started = 1;
   set_unbuffer();
+
+  if (run_diagnostic_mode()) {
+    _exit(0);
+  }
+
   wait_for_boot_quiet_window();
 
   int max_attempts = env_int(
