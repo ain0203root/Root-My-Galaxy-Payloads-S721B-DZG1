@@ -36,6 +36,20 @@ fetches `support/targets-v3.json` and every artifact from that immutable
 commit. Per-artifact SHA-256 fields and manifest signatures are not part of
 schema version 3. `targets-v2.json` is retained for released 0.2.3 clients.
 
+## Diagnostic mode
+
+The payload can be started in a read-only diagnostic mode before any exploit logic runs.
+Select one or more checks with the RMG_DIAG environment variable:
+
+```sh
+RMG_DIAG=help
+RMG_DIAG=startup
+RMG_DIAG=target,interfaces,slab
+RMG_DIAG=all
+```
+
+Available checks are startup, target, interfaces, and slab. Diagnostic mode exits immediately after the selected checks and does not enter run_exploit().
+
 ## Build
 
 ```sh
